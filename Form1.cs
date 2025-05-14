@@ -14,6 +14,9 @@ namespace RomashkaParser
     public partial class Form1 : Form
     {
         private static List<Signal> signalList = new List<Signal>();
+        private static bool _longs = true;
+        private static bool _shorts = false;
+
         public Form1()
         {
             InitializeComponent();
@@ -22,6 +25,9 @@ namespace RomashkaParser
         private void Form1_Load(object sender, EventArgs e)
         {
             label1.Text = $"Количество сигналов: {signalList.Count}";
+            checkBoxLongs.Checked = _longs;
+            checkBoxShorts.Checked = _shorts;
+            checkBoxShorts.Enabled = false;
         }
         public DateTime ParseCustomDateTime(string dateString)
         {
@@ -159,27 +165,45 @@ namespace RomashkaParser
             }
         }
 
-        private void buttonStart_Click(object sender, EventArgs e)
+        //  
+
+
+        private async void buttonStart_Click(object sender, EventArgs e)
         {
             var candlesCount = 0;
             var offsetMinimal = .0m;
             var riskRatio = .0m;
-            var take = 0;
+            var risk = 0;
 
             if (!string.IsNullOrEmpty(textBoxCandels.Text)) if (int.TryParse(textBoxCandels.Text, out var countCandelsResult)) candlesCount = countCandelsResult; else return;
-
             if (!string.IsNullOrEmpty(textBoxOffsetMinimal.Text)) if (decimal.TryParse(textBoxOffsetMinimal.Text.Replace(".", ","), out var offsetMinimalResult)) offsetMinimal = offsetMinimalResult; else return;
-
             if (!string.IsNullOrEmpty(textBoxRR.Text)) if (decimal.TryParse(textBoxRR.Text.Replace(".", ","), out var rrResult)) riskRatio = rrResult; else return;
+            if (!string.IsNullOrEmpty(textBoxRisk.Text)) if (int.TryParse(textBoxRisk.Text, out var takeResult)) risk = takeResult; else return;
 
-            if (!string.IsNullOrEmpty(textBoxTakeProfit.Text)) if (int.TryParse(textBoxTakeProfit.Text, out var takeResult)) take = takeResult; else return;
-
-            Exchange.Processing(signalList, candlesCount, offsetMinimal, riskRatio, take);
-
-
+            await Exchange.ProcessingParallel(signalList, candlesCount, offsetMinimal, riskRatio, risk, progressBar1, 100000, _longs, _shorts);
         }
 
         private void textBoxCandels_TextChanged(object sender, EventArgs e)
+        {
+
+        }
+
+        private void label2_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void checkBoxLongs_CheckedChanged(object sender, EventArgs e)
+        {
+            _longs = checkBoxLongs.Checked;
+        }
+
+        private void checkBoxShorts_CheckedChanged(object sender, EventArgs e)
+        {
+            _shorts = checkBoxShorts.Checked;
+        }
+
+        private void textBoxOffsetMinimal_TextChanged(object sender, EventArgs e)
         {
 
         }

@@ -7,14 +7,20 @@ using Binance.Net.Clients;
 using Binance.Net.Enums;
 using Binance.Net.Interfaces;
 using Newtonsoft.Json;
+using static System.Runtime.InteropServices.JavaScript.JSType;
+using static System.Windows.Forms.VisualStyles.VisualStyleElement.TaskbarClock;
 using File = System.IO.File;
 
 namespace RomashkaParser
 {
     public class Exchange
     {
-        private static int clsd = 0;
+        private static decimal _processed = .0m;
+        private static double _position = 0;
+        private static double _total = 0;
+        public static string _resultsStrings = @"Time;Side;Open Price;Take Profit;Stop Loss;PNL;Volume;Bars;Balance;SL TP" + Environment.NewLine;
         private static List<Kline> _dates = new List<Kline>();
+
         public static void SaveDates(DateTime starDateTime, DateTime endDateTime, string symbol, KlineInterval interval)
         {
             var resp = new List<IBinanceKline>();
@@ -42,81 +48,157 @@ namespace RomashkaParser
                 }
             }
         }
-
         public static List<Signal> SortedSignals(List<Signal> signals)
         {
             var sortedSigs = signals.OrderBy(x => x.Time).ToList();
             return sortedSigs;
-        } 
-
-        public static void Processing(List<Signal> signalList, int candlesCount, decimal offsetMinimal, decimal riskRatio, int takeProfit)
-        {
-            var pathResults = Environment.CurrentDirectory + @$"\results_{DateTime.Now:T}.csv".Replace(":", "_");
-            File.WriteAllText(pathResults, @"Time;Side;PNL;Bars;SL TP" + Environment.NewLine);
-            var path = Environment.CurrentDirectory + @"\dates.json";
-            if (File.Exists(path))
-            {
-                var jsonString = File.ReadAllText(path);
-                _dates = JsonConvert.DeserializeObject<List<Kline>>(jsonString) ?? new List<Kline>();
-            }
-
-            foreach (var signal in signalList)
-            {
-                if (signal.Price < 8999) continue;
-
-                if (clsd == 2682)
-                {
-                    var dd = new DateTime();
-                }
-                var openPrice = signal.Price;
-                var side = signal.Side;
-                var time = signal.Time;
-                var stopLoss = CalculateStopLoss(openPrice, candlesCount, offsetMinimal, side, time);
-
-                if (stopLoss < 0 ) continue;
-
-                var takeProfitPrice = CalculateTakeProfit(openPrice, stopLoss, riskRatio, side);
-                var stopLossPrice = 0m;
-                switch (side)
-                {
-                    case "LONG": stopLossPrice = openPrice - stopLoss; break;
-                    case "SHORT": stopLossPrice = openPrice + stopLoss; break;
-                }
-
-                var isOpen = true;
-                var count = 0;
-                while (isOpen)
-                {
-                    var checkBarTime = time.AddMinutes(5 * count);
-                    var response = CheckSignal(checkBarTime,openPrice, stopLossPrice, takeProfitPrice, side);
-                    isOpen = response.isOpen;
-                    if (!isOpen)
-                    {
-                        CloseSignal(signal, response.message, pathResults, count);
-                        break;
-                    }
-                    count++;
-                }
-            }
         }
+        private static async Task<List<Kline>> GetDates(string pathResults)
+        {
+            return await Task.Run(() =>
+            {
+                // Здесь ваша логика получения данных
+                List<Kline> klines = new List<Kline>();
 
-        private static void CloseSignal(Signal signal, string message, string path, int count)
+                var path = Environment.CurrentDirectory + @"\dates.json";
+                if (File.Exists(path))
+                {
+                    var jsonString = File.ReadAllText(path);
+                    klines = JsonConvert.DeserializeObject<List<Kline>>(jsonString) ?? new List<Kline>();
+                }
+                return klines;
+            });
+        }
+        private static void CloseSignal(Signal signal, string message, string path, decimal volume, int count, decimal riskRatio, decimal risk, decimal openPrice, decimal takeProfit, decimal stopLoss)
         {
             if (message.Contains("Take Profit"))
             {
-                var pnl = message.Replace("Take Profit ", "");
-                File.AppendAllText(path, @$"{signal.Time};{signal.Side};{pnl:0.00};{count};Take Profit" + Environment.NewLine);
+                _total += (double)(risk * riskRatio);
+                //File.AppendAllText(path, @$"{signal.Time};{signal.Side};{openPrice};{takeProfit};{stopLoss};{risk * riskRatio:0.00};{volume};{count};{_total};Take Profit" + Environment.NewLine);
+                _resultsStrings +=
+                    @$"{signal.Time};{signal.Side};{openPrice};{takeProfit};{stopLoss};{risk * riskRatio:0.00};{volume};{count};{_total};Take Profit" +
+                    Environment.NewLine;
             }
             else
             {
-                var pnl = message.Replace("Stop Loss ", "");
-                File.AppendAllText(path, @$"{signal.Time};{signal.Side};{pnl:0.00};{count};Stop Loss" + Environment.NewLine);
+                _total -= (double)risk;
+                //File.AppendAllText(path, @$"{signal.Time};{signal.Side};{openPrice};{takeProfit};{stopLoss};{-risk:0.00};{volume};{count};{_total};Stop Loss" + Environment.NewLine);
+                _resultsStrings +=
+                    @$"{signal.Time};{signal.Side};{openPrice};{takeProfit};{stopLoss};{-risk:0.00};{volume};{count};{_total};Stop Loss" +
+                    Environment.NewLine;
             }
+        }
+        public static async Task Processing(List<Signal> signalList, int candlesCount, decimal offsetMinimal, decimal riskRatio, int risk, ProgressBar bar, double startBalance, bool longs = true, bool shorts = true)
+        {
+            var pathResults = Environment.CurrentDirectory + @$"\results_{DateTime.Now:T}.csv".Replace(":", "_");
 
-            clsd++;
+            _total = startBalance;
+            _position = _total / 100;
+            _dates = await GetDates(pathResults);
+            
+            var currentSignals = new List<Signal>();
+
+            if (!longs) currentSignals = signalList.Where(x => x.Side != "LONG").ToList();
+            if (!shorts) currentSignals = signalList.Where(x => x.Side != "SHORT").ToList();
+            
+            await Task.Run(() =>
+            {
+                
+                var stepSignal = 100.0m / signalList.Count;
+
+                foreach (var signal in currentSignals)
+                {
+                    if (signal is { Price: < 8999, Name: "BTCUSDT" }) continue;
+                    if (signal is { Price: > 8999, Name: "ETHUSDT" }) continue;
+
+                    var stopLossPrice = 0m;
+                    var openPrice = signal.Price;
+                    var side = signal.Side;
+                    var time = signal.Time;
+                    var stopLoss = CalculateStopLoss(openPrice, candlesCount, offsetMinimal, side, time);
+
+                    if (stopLoss < 0) continue;
+
+                    var takeProfitPrice = CalculateTakeProfit(openPrice, stopLoss, riskRatio, side);
+                    
+                    switch (side)
+                    {
+                        case "LONG": stopLossPrice = openPrice - stopLoss; break;
+                        case "SHORT": stopLossPrice = openPrice + stopLoss; break;
+                    }
+
+                    var volume = risk / (Math.Abs(stopLossPrice - openPrice) / openPrice);
+
+                    SearchClose(signal, bar, time, openPrice, stopLossPrice, takeProfitPrice, side, pathResults, volume,
+                        riskRatio, risk, stepSignal);
+                    //var isOpen = true;
+                    //var count = 0;
+                   
+                    //while (isOpen)
+                    //{
+                    //    if (count > 10000)
+                    //    {
+                    //        bar.Invoke((MethodInvoker)delegate
+                    //        {
+                    //            bar.Value = 100;
+                    //            bar.Text = "Completed!";
+                    //        });
+                    //        MessageBox.Show("Completed!");
+                    //        return;
+                    //    }
+
+                    //    var checkBarTime = time.AddMinutes(5 * count);
+                    //    var response = CheckSignal(checkBarTime, openPrice, stopLossPrice, takeProfitPrice, side, count);
+                    //    isOpen = response.isOpen;
+                    //    if (!isOpen)
+                    //    {
+
+                    //        CloseSignal(signal, response.message, pathResults, volume, count, riskRatio, risk, openPrice, takeProfitPrice, stopLossPrice);
+                    //        break;
+                    //    }
+
+                    //    count++;
+                    //}
+
+
+                }
+            });
+        } 
+
+
+       
+
+        private static async Task SearchClose(Signal signal, ProgressBar bar, DateTime time, decimal openPrice, decimal stopLossPrice, decimal takeProfitPrice, string side, string pathResults, decimal volume, decimal riskRatio, decimal risk, decimal stepSignal)
+        {
+            await Task.Run(() =>
+            {
+                var isOpen = true;
+                var count = 0;
+
+                while (isOpen)
+                {
+                    if (count > 10000) return;
+                    
+                    var checkBarTime = time.AddMinutes(5 * count);
+                    var response = CheckSignal(checkBarTime, openPrice, stopLossPrice, takeProfitPrice, side, count);
+                    isOpen = response.isOpen;
+                    if (!isOpen)
+                    {
+
+                        CloseSignal(signal, response.message, pathResults, volume, count, riskRatio, risk, openPrice, takeProfitPrice, stopLossPrice);
+                        break;
+                    }
+
+                    count++;
+                }
+
+
+                _processed += stepSignal;
+                bar.Invoke((MethodInvoker)delegate { bar.Value = (int)_processed; });
+            });
         }
 
-        private static (bool isOpen, string message) CheckSignal(DateTime checkBarTime, decimal openPrice, decimal stopLossPrice, decimal takeProfitPrice, string side)
+        private static (bool isOpen, string message) CheckSignal(DateTime checkBarTime, decimal openPrice, decimal stopLossPrice, decimal takeProfitPrice, string side, int count)
         {
             
             var min = checkBarTime.Minute;
@@ -131,7 +213,8 @@ namespace RomashkaParser
                 checkBarTime = checkBarTime.AddMinutes(-min);
             }
 
-            var bar = _dates.FirstOrDefault(x => x.OpenTime.Year == checkBarTime.Year 
+            var bar = _dates.FirstOrDefault(x => x.OpenTime.Year == checkBarTime.Year
+                                                 && x.OpenTime.Month == checkBarTime.Month
                                                  && x.OpenTime.Day == checkBarTime.Day 
                                                  && x.OpenTime.Hour == checkBarTime.Hour
                                                  && x.OpenTime.Minute == checkBarTime.Minute);
@@ -141,14 +224,33 @@ namespace RomashkaParser
                 switch (side)
                 {
                     case "LONG":
-                        if (bar.ClosePrice >= (double)takeProfitPrice) return (false, $"Take Profit {takeProfitPrice - openPrice}");
-                        if (bar.ClosePrice <= (double)stopLossPrice) return (false, $"Stop Loss {stopLossPrice - openPrice}");
+                        if (bar.ClosePrice >= (double)takeProfitPrice)
+                        {
+                            if (count == 0)
+                            {
+                                var stop = "stop";
+                            }
+                            return (false, $"Take Profit {takeProfitPrice - openPrice}");
+                        }
+                        if (bar.ClosePrice <= (double)stopLossPrice)
+                        {
+                            if (count == 0)
+                            {
+                                var stop = "stop";
+                            }
+                            return (false, $"Stop Loss {stopLossPrice - openPrice}");
+                        }
+                        
                         break;
 
 
                     case "SHORT":
                         if (bar.ClosePrice <= (double)takeProfitPrice) return (false, $"Take Profit {openPrice - takeProfitPrice}");
-                        if (bar.ClosePrice >= (double)stopLossPrice) return (false, $"Stop Loss {openPrice - stopLossPrice}");
+                        if (bar.ClosePrice >= (double)stopLossPrice) return (false, $"Stop Loss {openPrice - stopLossPrice}"); 
+                        if (count == 0)
+                        {
+                            var stop = "stop";
+                        }
                         break;
                 }
                 return (true, "Not Found");
@@ -167,7 +269,7 @@ namespace RomashkaParser
                     var minPrice = GetMinimalPriceForCandles(time, candlesCount);
                     if (minPrice > 0)
                     {
-                        response = Math.Abs(openPrice - minPrice) + offsetMinimal;
+                        response = Math.Abs(openPrice - minPrice) + minPrice * offsetMinimal;
                         //        200 == 90000 - 89900 + 100
                         break;
                     }
@@ -176,7 +278,7 @@ namespace RomashkaParser
                     var maxPrice = GetMaximumPriceForCandles(time, candlesCount); 
                     if (maxPrice > 0)
                     {
-                        response = Math.Abs(openPrice - maxPrice) + offsetMinimal;
+                        response = Math.Abs(openPrice - maxPrice) + maxPrice * offsetMinimal;
                         //        200 == 90000 - 90100 + 100
                         break;
                     }
@@ -235,6 +337,120 @@ namespace RomashkaParser
 
             return response;
         }
+
+
+
+        public static async Task ProcessingParallel(List<Signal> signalList, int candlesCount, decimal offsetMinimal,
+            decimal riskRatio, int risk, ProgressBar bar, int startBalance, bool longs, bool shorts)
+        {
+            var pathResults = Environment.CurrentDirectory + @$"\results_{DateTime.Now:T}.csv".Replace(":", "_");
+
+            _total = startBalance;
+            _position = _total / 100;
+            _dates = await GetDates(pathResults);
+
+            // Фильтрация сигналов
+            var currentSignals = signalList.ToList(); // Копируем список
+            if (!longs) currentSignals = currentSignals.Where(x => x.Side != "LONG").ToList();
+            if (!shorts) currentSignals = currentSignals.Where(x => x.Side != "SHORT").ToList();
+
+            var stepSignal = 100.0m / currentSignals.Count;
+            var maxDegreeOfParallelism = Environment.ProcessorCount * 2; // Оптимальное число потоков
+            var semaphore = new SemaphoreSlim(maxDegreeOfParallelism);
+
+            var tasks = currentSignals.Select(async signal =>
+            {
+                // Пропускаем не нужные сигналы
+                if (signal is { Price: < 8999, Name: "BTCUSDT" }) return;
+                if (signal is { Price: > 8999, Name: "ETHUSDT" }) return;
+
+                await semaphore.WaitAsync();
+                try
+                {
+                    var stopLossPrice = 0m;
+                    var openPrice = signal.Price;
+                    var side = signal.Side;
+                    var time = signal.Time;
+                    var stopLoss = CalculateStopLoss(openPrice, candlesCount, offsetMinimal, side, time);
+
+                    if (stopLoss < 0) return;
+
+                    var takeProfitPrice = CalculateTakeProfit(openPrice, stopLoss, riskRatio, side);
+
+                    switch (side)
+                    {
+                        case "LONG":
+                            stopLossPrice = openPrice - stopLoss;
+                            break;
+                        case "SHORT":
+                            stopLossPrice = openPrice + stopLoss;
+                            break;
+                    }
+
+                    var volume = risk / (Math.Abs(stopLossPrice - openPrice) / openPrice);
+
+                    await SearchClose(signal, bar, time, openPrice, stopLossPrice,
+                                    takeProfitPrice, side, pathResults, volume,
+                                    riskRatio, risk, stepSignal);
+                }
+                finally
+                {
+                    semaphore.Release();
+                }
+            });
+
+            await Task.WhenAll(tasks);
+            MessageBox.Show("Completed!");
+        }
+
+        //public static async Task ProcessingParallel(List<Signal> signalList, int candlesCount, decimal offsetMinimal,
+        //    decimal riskRatio, int risk, ProgressBar bar, int startBalance, bool longs, bool shorts)
+        //{
+        //    await Task.Run(() =>
+        //    {
+        //        var pathResults = Environment.CurrentDirectory + @$"\results_{DateTime.Now:T}.csv".Replace(":", "_");
+
+        //        _total = startBalance;
+        //        _position = _total / 100;
+        //        _dates = GetDates(pathResults).Result;
+        //        var currentSignals = new List<Signal>();
+
+
+        //        if (!longs) currentSignals = signalList.Where(x => x.Side != "LONG").ToList();
+        //        if (!shorts) currentSignals = signalList.Where(x => x.Side != "SHORT").ToList();
+
+        //        var stepSignal = 100.0m / currentSignals.Count;
+
+        //        Parallel.ForEach(currentSignals, signal =>
+        //        {
+        //            if (signal is { Price: < 8999, Name: "BTCUSDT" }) return;
+        //            if (signal is { Price: > 8999, Name: "ETHUSDT" }) return;
+
+        //            var stopLossPrice = 0m;
+        //            var openPrice = signal.Price;
+        //            var side = signal.Side;
+        //            var time = signal.Time;
+        //            var stopLoss = CalculateStopLoss(openPrice, candlesCount, offsetMinimal, side, time);
+
+        //            if (stopLoss < 0) return;
+
+        //            var takeProfitPrice = CalculateTakeProfit(openPrice, stopLoss, riskRatio, side);
+
+        //            switch (side)
+        //            {
+        //                case "LONG": stopLossPrice = openPrice - stopLoss; break;
+        //                case "SHORT": stopLossPrice = openPrice + stopLoss; break;
+        //            }
+
+        //            var volume = risk / (Math.Abs(stopLossPrice - openPrice) / openPrice);
+
+        //            SearchClose(signal, bar, time, openPrice, stopLossPrice, takeProfitPrice, side, pathResults, volume,
+        //                riskRatio, risk, stepSignal);
+        //        });
+        //        MessageBox.Show("Completed!");
+        //    });
+
+        //}
     }
 
     public class Kline
